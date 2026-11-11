@@ -73,6 +73,16 @@ jobs:
         run: |
           xvfb-run --auto-servernum python3 app.py
 
+      - name: 📦 上传调试现场 (如生成)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-dump
+          path: debug/
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: 🧽 清理进程和临时文件
         if: always()
         run: |
