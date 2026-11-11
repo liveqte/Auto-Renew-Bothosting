@@ -21,11 +21,39 @@ jobs:
           python-version: '3.12'
 
       - name: 🛠️ 安装系统依赖和 Python 依赖
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk jq wget
+          # GitHub runner 偶发 DNS 故障: Temporary failure resolving 'azure.archive.ubuntu.com'
+          # 1) 检测 ubuntu 镜像域名解析, 异常时切换公共 DNS
+          if ! getent hosts azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com > /dev/null 2>&1; then
+            echo "⚠️ 检测到 ubuntu 镜像域名解析异常, 切换公共 DNS"
+            printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee /etc/resolv.conf > /dev/null
+          fi
+          # 2) 避开 Azure 内部镜像, 改用官方公共源 (noble 的 deb822 源走 mirror+file 重写)
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          # 3) 更新索引并安装, 失败自动重试
+          apt_ok=0
+          for i in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk jq wget; then
+              apt_ok=1
+              break
+            fi
+            echo "⚠️ 第 $i/3 次 apt 安装失败, 60 秒后重试..."
+            sleep 60
+          done
+          if [ "$apt_ok" != "1" ]; then
+            echo "❌ 系统依赖安装失败"
+            exit 1
+          fi
           pip install seleniumbase requests
-          seleniumbase install chromedriver
+          for i in 1 2 3; do
+            if seleniumbase install chromedriver; then
+              break
+            fi
+            echo "⚠️ 第 $i/3 次 chromedriver 下载失败, 60 秒后重试..."
+            sleep 60
+          done
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
