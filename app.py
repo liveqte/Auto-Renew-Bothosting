@@ -396,38 +396,59 @@ def format_countdown(countdown_str: str) -> str:
     except:
         return countdown_str
 
-# 归一化日期为 YYYY/MM/DD (同步自上游)
-def normalize_date(date_str: str) -> str:
-    parts = date_str.split('/')
-    if len(parts) == 3:
-        if len(parts[2]) == 4:   # MM/DD/YYYY
-            return f"{parts[2]}/{int(parts[0]):02d}/{int(parts[1]):02d}"
-        if len(parts[0]) == 4:   # YYYY/MM/DD
-            return f"{parts[0]}/{int(parts[1]):02d}/{int(parts[2]):02d}"
-    return date_str
+# 归一化日期为 YYYY/MM/DD (支持 2026/11/15, 11/15/2026, 2026-11-15, 15 Nov 2026, Nov 15 2026)
+_MONTH_NUM = {}
+for _i, _name in enumerate(["january", "february", "march", "april", "may", "june",
+                            "july", "august", "september", "october", "november", "december"], 1):
+    _MONTH_NUM[_name] = _i
+    _MONTH_NUM[_name[:3]] = _i
+
+def normalize_any_date(s: str) -> str:
+    s = s.strip()
+    m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", s)
+    if m:
+        return f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)          # MM/DD/YYYY
+    if m:
+        return f"{m.group(3)}/{int(m.group(1)):02d}/{int(m.group(2)):02d}"
+    m = re.match(r"^(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})$", s)  # 15 Nov 2026
+    if m and m.group(2).lower()[:3] in _MONTH_NUM:
+        return f"{m.group(3)}/{_MONTH_NUM[m.group(2).lower()[:3]]:02d}/{int(m.group(1)):02d}"
+    m = re.match(r"^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$", s)  # Nov 15, 2026
+    if m and m.group(1).lower()[:3] in _MONTH_NUM:
+        return f"{m.group(3)}/{_MONTH_NUM[m.group(1).lower()[:3]]:02d}/{int(m.group(2)):02d}"
+    return s
 
 DATE_RE = r"(\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}/\d{4})"
+# 数字日期 + 英文月份日期 (站点当前显示 "Expires 15 Nov 2026. Renew manually to extend it for 4 days.")
+ANY_DATE_RE = (r"(\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}/\d{4}"
+               r"|\d{1,2}\s+[A-Za-z]{3,9}\.?,?\s+\d{4}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4})")
 
-# 获取过期日期 (同步自上游: 兜底取页面中任意日期)
+# 页面内嵌 SvelteKit 后端数据 (最精确)
+RENEWAL_DUE_RE   = re.compile(r'freeRenewalDueAt"\s*:\s*"(\d{4}-\d{2}-\d{2})')
+RENEWAL_OPENS_RE = re.compile(r'freeRenewalOpensAt"\s*:\s*"(\d{4}-\d{2}-\d{2}T[\d:.]+Z)')
+
+# 获取过期日期
 def extract_expiry_date(page_source: str) -> str:
-    patterns = [
-        r"[Ee]xpires\s*[:\-]?\s*" + DATE_RE,   # Expires 10/24/2026. Renew manually to extend it for 4 days.
-        DATE_RE,                                # 兜底: 账单页纯文本中通常只有到期日期
+    candidates = [
+        RENEWAL_DUE_RE.search(page_source),                            # freeRenewalDueAt: 2026-11-15T...
+        re.search(r"[Ee]xpires\s*[:\-]?\s*" + ANY_DATE_RE, page_source),  # Expires 15 Nov 2026
+        re.search(DATE_RE, page_source),                               # 兜底: 纯数字日期
+        re.search(ANY_DATE_RE, page_source),
     ]
-    for pattern in patterns:
-        match = re.search(pattern, page_source)
-        if match:
-            return normalize_date(match.group(1))
+    for m in candidates:
+        if m:
+            return normalize_any_date(m.group(1))
     return None
 
-# 优先从 DOM 的 st-meta 元素提取到期日期 (不依赖页面语言, 同步自上游)
+# 优先从 DOM 的 st-meta 元素提取到期日期 (不依赖页面语言)
 def get_expiry_from_dom(sb) -> str:
     for selector in ['span.st-meta', '.st-meta', '[class*="st-meta"]']:
         try:
             if sb.is_element_present(selector):
-                match = re.search(DATE_RE, sb.get_text(selector))
+                match = re.search(ANY_DATE_RE, sb.get_text(selector))
                 if match:
-                    return normalize_date(match.group(1))
+                    return normalize_any_date(match.group(1))
         except Exception:
             pass
     return None
@@ -603,7 +624,7 @@ def do_discord_login(sb) -> bool:
     return False
 
 
-# 读取账单页的完整文本(text+source)并提取到期日期
+# 读取账单页的完整文本(text+source)并提取到期日期/冷却/下次可续期时间
 def read_billings_state(sb):
     try:
         page = sb.get_page_text() + "\n" + sb.get_page_source()
@@ -611,7 +632,9 @@ def read_billings_state(sb):
         page = sb.get_page_source()
     expiry = get_expiry_from_dom(sb) or extract_expiry_date(page)
     cooldown = find_cooldown(page)
-    return page, expiry, cooldown
+    m = RENEWAL_OPENS_RE.search(page)
+    opens_at = m.group(1)[:16].replace('T', ' ') if m else None
+    return page, expiry, cooldown, opens_at
 
 
 # 主流程
@@ -703,9 +726,9 @@ def main():
         if _LOGIN_METHOD == "Discord Token":
             print("ℹ️ 本次使用 Discord OAuth 登录，新的 SESSION_TOKEN 将自动更新到 Secrets")
 
-        # 提取当前到期日期 (上游新逻辑: DOM st-meta 优先 + 页面全文兜底)
+        # 提取当前到期日期 (DOM st-meta 优先 + 页面全文/后端数据兜底)
         sb.sleep(3)
-        page, current_expiry, current_cooldown = read_billings_state(sb)
+        page, current_expiry, current_cooldown, opens_at = read_billings_state(sb)
         dump_debug(sb, "billings_login")
         if current_expiry:
             print(f"📅 当前到期日期: {current_expiry}")
@@ -795,7 +818,7 @@ def main():
             sb.sleep(6)
 
             # 提取新的到期日期和冷却倒计时
-            new_page, new_expiry, new_cooldown = read_billings_state(sb)
+            new_page, new_expiry, new_cooldown, _ = read_billings_state(sb)
             dump_debug(sb, "billings_after_renew")
 
             # 兜底: 刷新页面再读一次 (有些前端需要刷新后才显示新的到期时间)
@@ -805,7 +828,7 @@ def main():
                     sb.refresh()
                     sb.wait_for_ready_state_complete()
                     sb.sleep(4)
-                    new_page, new_expiry2, new_cooldown = read_billings_state(sb)
+                    new_page, new_expiry2, new_cooldown, _ = read_billings_state(sb)
                     if new_expiry2:
                         new_expiry = new_expiry2
                     dump_debug(sb, "billings_after_refresh")
@@ -856,10 +879,13 @@ def main():
             if countdown_text:
                 friendly = format_countdown(countdown_text)
                 print(f"⏳ 未到续期时间，倒计时: {countdown_text} ({friendly})")
+                extra = f"⏱️ 可续期时间: {friendly}后"
+                if opens_at:
+                    extra += f"（约 {opens_at} UTC 开放）"
                 send_telegram_message(
                     format_notification(
                         "⏳ 未到续期时间",
-                        extra=f"⏱️ 可续期时间: {friendly}后",
+                        extra=extra,
                         expiry_date=current_expiry or "（未获取到）"
                     )
                 )
