@@ -678,15 +678,16 @@ def main():
                 if value:
                     sb.add_cookie({"name": name, "value": value, "domain": "bot-hosting.net"})
 
-            print(f"🌐 访问 {BASE_URL}/a/billings ...")
-            sb.open(f"{BASE_URL}/a/billings")
+            print(f"🌐 访问 {BASE_URL}/dash/billings ...")
+            sb.open(f"{BASE_URL}/dash/billings")
             sb.wait_for_ready_state_complete()
             sb.sleep(3)
             current_url = sb.get_current_url()
             current_title = sb.get_title()
             print(f"📝 当前URL: {current_url}, Title: {current_title}")
 
-            if "/a/billings" in current_url and "/login" not in current_url and "error=" not in current_url:
+            # 站点路由已从 /a/billings 迁移到 /dash/billings, 断言用通用 billings 路径
+            if "billings" in current_url.lower() and "/login" not in current_url and "error=" not in current_url:
                 login_ok = True
                 print("✅ SESSION_TOKEN 登录成功, 当前已到达账单页")
             else:
@@ -697,15 +698,15 @@ def main():
             _LOGIN_METHOD = "Discord Token"
             print("\n🔄 SESSION_TOKEN 登录失败或未配置，尝试 Discord OAuth 登录...")
             if do_discord_login(sb):
-                print(f"🌐 访问 {BASE_URL}/a/billings ...")
-                sb.open(f"{BASE_URL}/a/billings")
+                print(f"🌐 访问 {BASE_URL}/dash/billings ...")
+                sb.open(f"{BASE_URL}/dash/billings")
                 sb.wait_for_ready_state_complete()
                 sb.sleep(3)
                 current_url = sb.get_current_url()
                 current_title = sb.get_title()
                 print(f"📝 当前URL: {current_url}, Title: {current_title}")
 
-                if "a/billings" in current_url:
+                if "billings" in current_url.lower():
                     login_ok = True
                     print("✅ Discord OAuth 登录成功,当前已到达账单页")
                 else:
